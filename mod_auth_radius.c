@@ -147,10 +147,12 @@ typedef struct radius_packet_t {
 #  define TRUE !FALSE
 #endif
 
+#ifdef ENABLE_COOKIE_SUPPORT
 /* Add a cookie to an outgoing request */
 static const char *cookie_name = "RADIUS";
 
 #define COOKIE_SIZE                   1024
+#endif
 
 module AP_MODULE_DECLARE_DATA radius_auth_module;
 
@@ -185,6 +187,19 @@ static void *radius_server_config_alloc(apr_pool_t *p, server_rec *s)
 
 	return scr;
 }
+
+#ifdef ENABLE_SERVER_SIDE_CACHE
+
+/**
+ * define user defined APR error result code (used by hashPassword)
+ */
+#define AMAR_EINVALSALT		(APR_OS_START_USERERR + 1)
+
+static APR_OPTIONAL_FN_TYPE(ap_authn_cache_store) *authn_cache_store = NULL;
+#define AUTHN_CACHE_STORE(r,user,realm,data) \
+if (authn_cache_store != NULL) \
+	        authn_cache_store((r), "radius", (user), (realm), (data))
+#endif
 
 /*
  * This function gets called to merge two per-server configuration
@@ -394,6 +409,7 @@ static const char *bind_address_set(cmd_parms *cmd,
 	return NULL;
 }
 
+#ifdef ENABLE_COOKIE_SUPPORT
 /*
  * AddRadiusCookieValid: Set the cookie valid time.
  */
@@ -408,6 +424,7 @@ static const char *cookie_set_timeout(cmd_parms *cmd,
 
 	return NULL;
 }
+#endif
 
 /* Table of which command does what */
 static command_rec auth_cmds[] = {
@@ -419,9 +436,11 @@ static command_rec auth_cmds[] = {
 		      NULL, RSRC_CONF,
 		      "per-server binding local socket to this local IP address. RADIUS requests will be sent *from* this IP address."),
 
+#ifdef ENABLE_COOKIE_SUPPORT
 	AP_INIT_TAKE1("AddRadiusCookieValid", cookie_set_timeout,
 		      NULL, RSRC_CONF,
 		      "per-server time in minutes for which the returned cookie is valid. After this time, authentication will be requested again. Use '0' for forever."),
+#endif
 
 	AP_INIT_TAKE1("AddRadiusCallingStationID", ap_set_string_slot,
 		      (void *)APR_OFFSETOF(radius_dir_config_rec_t, calling_station_id), OR_AUTHCFG,
@@ -431,10 +450,11 @@ static command_rec auth_cmds[] = {
 		     (void *)APR_OFFSETOF(radius_dir_config_rec_t, authoritative), OR_AUTHCFG,
 		     "per-directory access on failed authentication. If set to 'no', then access control is passed along to lower modules on failed authentication."),
 
+#ifdef ENABLE_COOKIE_SUPPORT
 	AP_INIT_TAKE1("AuthRadiusCookieValid", ap_set_int_slot,
 		      (void *)APR_OFFSETOF(radius_dir_config_rec_t, timeout), OR_AUTHCFG,
 		      "per-directory time in minutes for which the returned cookie is valid. After this time, authentication will be requested again .Use 0 for forever."),
-
+#endif
 	AP_INIT_FLAG("AuthRadiusActive", ap_set_flag_slot,
 		     (void *)APR_OFFSETOF(radius_dir_config_rec_t, active), OR_AUTHCFG,
 		     "per-directory toggle the use of RADIUS authentication."),
@@ -502,6 +522,7 @@ static void attribute_add(radius_packet_t *packet,
 	memcpy(p->data, data, length);
 }
 
+#ifdef ENABLE_COOKIE_SUPPORT
 /* make a cookie based on secret + public information */
 static char *cookie_alloc(request_rec *r,
 			  time_t expires,
@@ -663,6 +684,8 @@ static char *cookie_from_request(request_rec *r)
 
 	return NULL; /* no cookie was found */
 }
+
+#endif
 
 /* There's a lot of parameters to this function, but it does a lot of work */
 static int radius_authenticate(request_rec *r,
@@ -992,8 +1015,10 @@ static int password_check(request_rec *r,
 			p++;
 		}
 
+#ifdef ENABLE_COOKIE_SUPPORT
 		/* set the magic cookie */
 		cookie_add(r, r->err_headers_out, cookie_alloc(r, expires, "", server_state), expires);
+#endif
 
 		/* log the challenge, as it IS an error returned to the user */
 		RADLOG_DEBUG(r->server, "RADIUS server requested challenge for user %s", user);
@@ -1023,6 +1048,93 @@ void challenge_auth_failure(request_rec *r,
 					  NULL));
 	}
 }
+
+#ifdef ENABLE_SERVER_SIDE_CACHE
+/*
+ * method to generate a salt to use with apr_md5_encode
+ * based on generate_salt found in support/passwd_common.c
+ */
+static int generate_salt(char *salt, size_t size)
+{
+
+	unsigned char random[32];
+
+	static const char integerToAscii64[] = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+	unsigned int value = 0;
+
+	unsigned int bits = 0;
+
+	apr_status_t resultValue;
+
+	apr_size_t lenghtOfRandom = (size * 6 + 7)/8;
+
+	if (lenghtOfRandom > sizeof(random)) {
+
+		return -1;
+
+	}
+
+	resultValue = apr_generate_random_bytes(random, lenghtOfRandom);
+
+	if (resultValue) {
+
+		return -2;
+
+	}
+
+	apr_size_t currentRandomPosition = 0;
+
+	while (size > 0) {
+
+		if (bits < 6) {
+
+			value |= (random[currentRandomPosition++] << bits);
+
+			bits += 8;
+		}
+
+		*salt++ = integerToAscii64[value & 0x3f];
+		size--;
+		value >>= 6;
+		bits -= 6;
+
+	}
+
+	*salt = '\0';
+
+	return 0;
+
+}
+
+/*
+ * create a hashed version of the given password string to store
+ * in cache
+ * (uses apr_md5_encode to hash the password)
+ *
+ * @param hash A buffer to store the hashed password to
+ * @param password The password to encode
+ * @param length The size of the hash buffer
+ *
+ */
+static apr_status_t hashPassword(char* hash, const char* password, apr_size_t length) {
+
+	char salt[16];
+
+	int saltGenerationResult = generate_salt(salt, 16);
+
+	if (saltGenerationResult == 0) {
+
+		apr_status_t md5Result = apr_md5_encode(password, salt, hash, length);
+
+		return md5Result;
+
+	}
+
+	return AMAR_EINVALSALT;
+
+}
+#endif
 
 /* These functions return 0 if client is OK, and proper error status
  * if not... either HTTP_UNAUTHORIZED, if we made a check, and it failed, or
@@ -1073,6 +1185,7 @@ int basic_authentication_common(request_rec *r,
 	RADLOG_DEBUG(r->server, "Radius Auth for: %s requests %s : file=%s",
 		     r->server->server_hostname, r->uri, r->filename);
 
+#ifdef ENABLE_COOKIE_SUPPORT
 	/* check for the existence of a cookie: do weak authentication if so */
 	if ((cookie = cookie_from_request(r)) != NULL) {
 		RADLOG_DEBUG(r->server, "Found cookie=%s for user=%s : ", cookie, r->user);
@@ -1101,8 +1214,10 @@ int basic_authentication_common(request_rec *r,
 			return HTTP_UNAUTHORIZED;
 		}
 	} else {
-		RADLOG_DEBUG(r->server, "No cookie found.  Trying RADIUS authentication.");
+		RADLOG_DEBUG(r->server, "No cookie found.");
 	}
+#endif
+	RADLOG_DEBUG(r->server, "Trying RADIUS authentication.");
 
 #if 0
 	/*
@@ -1117,8 +1232,7 @@ int basic_authentication_common(request_rec *r,
 
 	/* Check the password, and fill in the error string if an error happens */
 	if (!(password_check(r, scr, r->user, sent_pw, state, message, errstr))) {
-		RADLOG_DEBUG(r->server, "RADIUS authentication for user=%s password=%s failed",
-			     r->user, sent_pw);
+		RADLOG_DEBUG(r->server, "RADIUS authentication of user=%s failed", r->user);
 		if (!(rec->authoritative)) {
 			RADLOG_DEBUG(r->server, "We're not authoritative.  Never mind.");
 			return DECLINED;        /* never mind */
@@ -1128,6 +1242,18 @@ int basic_authentication_common(request_rec *r,
 		return HTTP_UNAUTHORIZED;
 	}
 
+#ifdef ENABLE_SERVER_SIDE_CACHE
+
+	char hash[MAX_STRING_LEN];
+	apr_status_t hashResult = hashPassword(hash, sent_pw, MAX_STRING_LEN);
+
+	if ( hashResult == APR_SUCCESS ) {
+		AUTHN_CACHE_STORE(r, r->user, NULL, hash);
+	}
+
+#endif
+
+#ifdef ENABLE_COOKIE_SUPPORT
 	if (rec->timeout == -1) { /* if we let the server choose */
 		min = (scr->timeout == -1)?RADIUS_DEFAULT_TIMEOUT:scr->timeout;      /* the server config is authoritative */
 	} else {
@@ -1144,10 +1270,14 @@ int basic_authentication_common(request_rec *r,
 
 	RADLOG_DEBUG(r->server, "RADIUS Authentication for user=%s password=%s OK.  Cookie expiry in %d minutes",
 		     r->user, sent_pw, min);
+#endif
+	RADLOG_DEBUG(r->server, "RADIUS Authentication of user=%s successful.", r->user);
 
+#ifdef ENABLE_COOKIE_SUPPORT
 	RADLOG_DEBUG(r->server, "Adding cookie %s", cookie);
 
 	cookie_add(r, r->headers_out, cookie, expires);
+#endif
 
 	return OK;
 }
@@ -1222,6 +1352,13 @@ static int radius_hook_init(apr_pool_t *pconf,
 	return OK;
 }
 
+#ifdef ENABLE_SERVER_SIDE_CACHE
+static void opt_retr(void)
+{
+	    authn_cache_store = APR_RETRIEVE_OPTIONAL_FN(ap_authn_cache_store);
+}
+#endif
+
 static void register_hooks(apr_pool_t *p)
 {
 	static const char *const aszPost[] = { "mod_authz_user.c", NULL };
@@ -1237,6 +1374,11 @@ static void register_hooks(apr_pool_t *p)
 			     APR_HOOK_MIDDLE,
 			     AP_AUTH_INTERNAL_PER_CONF);
 #endif
+
+#ifdef ENABLE_SERVER_SIDE_CACHE
+    ap_hook_optional_fn_retrieve(opt_retr, NULL, NULL, APR_HOOK_MIDDLE);
+#endif
+
 }
 
 module AP_MODULE_DECLARE_DATA radius_auth_module = {

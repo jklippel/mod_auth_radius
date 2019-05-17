@@ -66,7 +66,7 @@ install:
 endif
 
 mod_auth_radius.o: mod_auth_radius.c
-	@apxs -Wall -DMOD_RADIUS_AUTH_VERSION_STRING='\"$(MOD_RADIUS_VERSION_STRING)\"' -c $<
+	@apxs -Wall -DENABLE_COOKIE_SUPPORT=1 -DMOD_RADIUS_AUTH_VERSION_STRING='\"$(MOD_RADIUS_VERSION_STRING)\"' -c $<
 
 ######################################################################
 #

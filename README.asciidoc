@@ -195,3 +195,64 @@ http://freeradius.org/list/index.html.
 
 
 Author:  Alan DeKok <aland@freeradius.org>
+
+8. Caching using mod_authn_socache
+----------------------------------
+
+Some clients do not have the abilities to use cookies and sometimes
+cookies are not even allowed on the client side.
+This results in a lot of traffic on the radius server as in this
+case the authentication request is always forwarded to radius.
+To mitigate this issue one can use the server side cache automatism
+provided by the apache mod_authn_socache module which
+stores the credentials once verified via radius for a configurable
+(AuthnCacheTimeout) amount of time. The password provided within
+each request is hashed and compared to the hashed password entry
+stored in the cache. If the cache matches and the timeout has
+not been reached the request is authorized without any request to
+radius. After the cache timeout (which defaults to 5 minutes) the
+radius is again asked for verification regardless of whether the
+hashes still match or not.
+
+To enable caching you must build the module with ENABLE_SERVER_SIDE_CACHE defined:
+
+e.g. change the following line in Makefile
+	@apxs -Wall -DENABLE_COOKIE_SUPPORT=1 -DMOD_RADIUS_AUTH_VERSION_STRING='\"$(MOD_RADIUS_VERSION_STRING)\"' -c $<
+
+to
+
+	@apxs -Wall -DENABLE_SERVER_SIDE_CACHE=1 -DMOD_RADIUS_AUTH_VERSION_STRING='\"$(MOD_RADIUS_VERSION_STRING)\"' -c $<
+
+This will enable the server side cache and disable the cookie support.
+It is also possible to activate both the cookie support
+and the server side cache at the same time (using both defines).
+
+To use the caching by mod_authn_socache you must adapt the httpd
+configuration as follows:
+
+- Load the following modules in httpd.conf:
+    - authn_socache_module "/usr/lib/apache2/modules/mod_authn_socache.so"
+    - socache_shmcb_module "/usr/lib/apache2/modules/mod_socache_shmcb.so"
+
+You may choose between the available modules (smcb, memcached, dbd,
+etc.) to cache the values.
+
+Name the cache module you want to use in your httpd.conf
+configuration (optional):
+
+e.g. to add shared memory cache use:
+
+  AuthnCacheSOCache shmcb
+
+
+To cache the values of the authentication provider use the
+following entries in your Location/Directory configuration
+for the AuthProvider radius:
+
+    AuthBasicProvider socache radius
+    AuthnCacheProvideFor radius
+    AuthnCacheTimeout 300
+
+See https://httpd.apache.org/docs/trunk/mod/mod_authn_socache.html
+for further details on mod_authn_socache.
+
